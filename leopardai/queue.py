@@ -1,5 +1,5 @@
 """
-Lepton's queue API is a simple message queue. It is useful for sending messages between
+leopard's queue API is a simple message queue. It is useful for sending messages between
 deployments. For example, you can use the KV API and the queue API to build a distributed
 task manager.
 """
@@ -11,17 +11,17 @@ from typing import Optional, Union
 
 from loguru import logger
 
-from leptonai.api import queue as queue_api
-from leptonai.api.connection import Connection
-from leptonai.api import workspace as workspace_api
+from leopardai.api import queue as queue_api
+from leopardai.api.connection import Connection
+from leopardai.api import workspace as workspace_api
 
 # If not ready, wait for this amount of seconds before checking again.
-_lepton_readiness_wait_time_ = 10
+_leopard_readiness_wait_time_ = 10
 # Timeout limit.
-_lepton_readiness_timeout_ = 60 * 5  # 5 minutes
+_leopard_readiness_timeout_ = 60 * 5  # 5 minutes
 
 # max queue value lengths: 256KB for value.
-_lepton_max_value_length_ = 256 * 1024
+_leopard_max_value_length_ = 256 * 1024
 
 
 class Queue(object):
@@ -119,11 +119,11 @@ class Queue(object):
                 if wait_for_creation:
                     # wait for the queue to be ready
                     start = time.time()
-                    while time.time() - start < _lepton_readiness_timeout_:
+                    while time.time() - start < _leopard_readiness_timeout_:
                         if self.ready():
                             break
                         logger.trace(f"Queue {name} is not ready yet. Waiting...")
-                        time.sleep(_lepton_readiness_wait_time_)
+                        time.sleep(_leopard_readiness_wait_time_)
                     else:
                         raise RuntimeError(
                             f"Queue {name} is not ready after"
@@ -144,11 +144,11 @@ class Queue(object):
         Returns if the queue is ready to use, but wait for the queue to be ready asynchronously.
         """
         start = time.time()
-        while time.time() - start < _lepton_readiness_timeout_:
+        while time.time() - start < _leopard_readiness_timeout_:
             if self.ready():
                 break
             logger.trace(f"Queue {self._queue} is not ready yet. Waiting...")
-            await asyncio.sleep(_lepton_readiness_wait_time_)
+            await asyncio.sleep(_leopard_readiness_wait_time_)
         else:
             raise RuntimeError(
                 f"Queue {self._queue} is not ready after {time.time() - start} seconds."
@@ -199,15 +199,15 @@ class Queue(object):
         """
         Send a message to the queue.
 
-        Note that Lepton queue carries out deduplication: if you send the same message
+        Note that leopard queue carries out deduplication: if you send the same message
         twice, the second message will be discarded. This is useful for distributed fault
         tolerance. The deduplication is based on the content of the message, and the dedup
         time window is around 5 minutes.
         """
-        if len(message) > _lepton_max_value_length_:
+        if len(message) > _leopard_max_value_length_:
             raise ValueError(
                 f"Value length {len(message)} exceeds the maximum allowed length"
-                f" {_lepton_max_value_length_}."
+                f" {_leopard_max_value_length_}."
             )
         res = queue_api.send(self._conn, self._queue, message)
         if not res.ok:
