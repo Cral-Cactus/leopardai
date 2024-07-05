@@ -1,17 +1,17 @@
 import os
 import tempfile
 
-# Set cache dir to a temp dir before importing anything from leptonai
+# Set cache dir to a temp dir before importing anything from leopardai
 tmpdir = tempfile.TemporaryDirectory()
-os.environ["LEPTON_CACHE_DIR"] = tmpdir.name
+os.environ["leopard_CACHE_DIR"] = tmpdir.name
 
 import unittest
 
 from loguru import logger
 
-from leptonai import config
-from leptonai import photon
-from leptonai.util import check_photon_name
+from leopardai import config
+from leopardai import photon
+from leopardai.util import check_photon_name
 
 from utils import random_name
 

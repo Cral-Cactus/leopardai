@@ -3,9 +3,9 @@ import os
 import shutil
 import tempfile
 
-# Set cache dir to a temp dir before importing anything from leptonai
+# Set cache dir to a temp dir before importing anything from leopardai
 tmpdir = tempfile.mkdtemp()
-os.environ["LEPTON_CACHE_DIR"] = tmpdir
+os.environ["leopard_CACHE_DIR"] = tmpdir
 
 import unittest
 
@@ -13,10 +13,10 @@ from click.testing import CliRunner
 from loguru import logger
 import requests
 
-from leptonai import config
-from leptonai.photon import FileParam
-from leptonai.photon.base import find_local_photon
-from leptonai.cli import lep as cli
+from leopardai import config
+from leopardai.photon import FileParam
+from leopardai.photon.base import find_local_photon
+from leopardai.cli import lep as cli
 from utils import random_name, photon_run_local_server, sub_test, skip_if_macos
 
 
@@ -305,7 +305,7 @@ class TestPhotonCli(unittest.TestCase):
         tmp = tempfile.NamedTemporaryFile(suffix=".py")
         with open(tmp.name, "w") as f:
             f.write("""
-from leptonai.photon import Photon
+from leopardai.photon import Photon
 
 class CustomPhoton(Photon):
     @Photon.handler
@@ -324,11 +324,11 @@ class CustomPhoton(Photon):
             # just filename
             (tmp.name, True),
             # use variable
-            ("leptonai.photon.prebuilt.Echo", True),
+            ("leopardai.photon.prebuilt.Echo", True),
             # should specify class name when using variable
-            ("leptonai.photon.prebuilt", False),
+            ("leopardai.photon.prebuilt", False),
             # with "py:" schema
-            ("py:leptonai.photon.prebuilt.Echo", True),
+            ("py:leopardai.photon.prebuilt.Echo", True),
             # invalid
             (random_name(), False),
             ("nonexisting.py", False, "file"),
@@ -336,8 +336,8 @@ class CustomPhoton(Photon):
             (transformers_model, True),
             # hf without "hf:"
             (transformers_model[3:], False),
-            ("leptonai.photon.hf.hf.HuggingFacePhoton", False),
-            ("leptonai.photon.hf.hf.HuggingfaceTextGenerationPhoton", False),
+            ("leopardai.photon.hf.hf.HuggingFacePhoton", False),
+            ("leopardai.photon.hf.hf.HuggingfaceTextGenerationPhoton", False),
             # vllm model
             ("vllm:gpt2", True),
         ]

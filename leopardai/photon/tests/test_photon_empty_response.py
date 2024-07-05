@@ -3,12 +3,12 @@ import requests
 import tempfile
 import unittest
 
-# Set cache dir to a temp dir before importing anything from leptonai
+# Set cache dir to a temp dir before importing anything from leopardai
 tmpdir = tempfile.mkdtemp()
-os.environ["LEPTON_CACHE_DIR"] = tmpdir
+os.environ["leopard_CACHE_DIR"] = tmpdir
 
-from leptonai import Photon
-from leptonai.photon import PNGResponse, StreamingResponse
+from leopardai import Photon
+from leopardai.photon import PNGResponse, StreamingResponse
 
 from utils import random_name, photon_run_local_server
 
