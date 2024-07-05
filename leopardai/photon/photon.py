@@ -715,3 +715,646 @@ class Photon(BasePhoton):
         self._collect_metrics(app)
 
         return app
+
+    @staticmethod
+    def _uvicorn_log_config():
+        # Filter out /healthz and /metrics from uvicorn access log
+        class LogFilter(logging.Filter):
+            def filter(self, record: logging.LogRecord) -> bool:
+                return (
+                    record.getMessage().find("/healthz ") == -1
+                    and record.getMessage().find("/metrics ") == -1
+                )
+
+        logging.getLogger("uvicorn.access").addFilter(LogFilter())
+
+        # prepend timestamp to log
+        log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
+        for formatter, config in log_config["formatters"].items():
+            config["fmt"] = "%(asctime)s - " + config["fmt"]
+        return log_config
+
+    @staticmethod
+    def _print_launch_info(host, port, log_level):
+        logger = logging.getLogger("leopard Photon Launcher")
+        logger.setLevel(log_level.upper())
+
+        if not logger.hasHandlers():
+            formatter = logging.Formatter(
+                "%(asctime)s - \x1b[32m%(levelname)s\x1b[0m:  %(message)s\t"
+            )
+            handler = logging.StreamHandler()
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+        logger.propagate = False
+        # Send the welcome message, especially to make sure that users will know
+        # whicl URL to visit in order to not get a "not found" error.
+        logger.info(
+            "\n".join([
+                "\nIf you are using standard photon, a few urls that may be helpful:",
+                "\t- "
+                + click.style(f"http://{host}:{port}/docs", fg="green", bold=True)
+                + " OpenAPI documentation",
+                "\t- "
+                + click.style(f"http://{host}:{port}/redoc", fg="green", bold=True)
+                + " Redoc documentation",
+                "\t- "
+                + click.style(
+                    f"http://{host}:{port}/openapi.json", fg="green", bold=True
+                )
+                + " Raw OpenAPI schema",
+                "\t- "
+                + click.style(f"http://{host}:{port}/metrics", fg="green", bold=True)
+                + " Prometheus metrics",
+                "\nIf you are using python clients, here is an example code snippet:",
+                "\tfrom leopardai.client import Client, local",
+                f"\tclient = Client(local(port={port}))",
+                "\tclient.healthz()  # checks the health of the photon",
+                "\tclient.paths()  # lists all the paths of the photon",
+                (
+                    "\tclient.method_name?  # If client has a method_name method,"
+                    " get the docstring"
+                ),
+                "\tclient.method_name(...)  # calls the method_name method",
+                (
+                    "If you are using ipython, you can use tab completion by typing"
+                    " `client.` and then press tab.\n"
+                ),
+            ])
+        )
+
+    def _uvicorn_run(self, host, port, log_level, log_config):
+        app = self._create_app(load_mount=True)
+
+        self._replace_openapi_if_needed(app)
+
+        @app.on_event("startup")
+        async def uvicorn_startup():
+            # Currently, we don't do much in the startup phase.
+            logger.info("Starting photon app - running startup prep code.")
+
+        @app.on_event("shutdown")
+        async def uvicorn_shutdown():
+            # We do not do much in the shutdown phase either.
+            logger.info("Shutting down photon app - running shutdown prep code.")
+
+        # /healthz added at this point will be at the end of `app.routes`,
+        # so it will act as a fallback
+        @app.get("/healthz", include_in_schema=False)
+        def healthz():
+            return {"status": "ok"}
+
+        if (
+            self.health_check_liveness_tcp_port is None
+            or self.health_check_liveness_tcp_port == port
+        ):
+
+            @app.get("/livez", include_in_schema=False)
+            def livez():
+                return {"status": "ok"}
+
+        # /favicon.ico added at this point will be at the end of `app.routes`,
+        # so it will act as a fallback
+        @app.get("/favicon.ico", include_in_schema=False)
+        def favicon():
+            path = os.path.join(os.path.dirname(__file__), "favicon.ico")
+            if not os.path.exists(path):
+                return Response(status_code=404)
+            return FileResponse(path)
+
+        @app.get("/queue-length", include_in_schema=False)
+        def queue_length():
+            num_tasks = len(leopard_uvicorn_server.server_state.tasks)
+            # subtract 1 for the current task
+            if num_tasks > 0:
+                num_tasks -= 1
+            return num_tasks
+
+        config = uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            log_config=log_config,
+            timeout_graceful_shutdown=self.timeout_graceful_shutdown
+            or DEFAULT_TIMEOUT_GRACEFUL_SHUTDOWN,
+            # so that we can get the real client IP address in the
+            # access logs (and `X-Forwarded-For` header)
+            proxy_headers=True,
+            forwarded_allow_ips="*",
+            timeout_keep_alive=DEFAULT_TIMEOUT_KEEP_ALIVE,
+        )
+        leopard_uvicorn_server = uvicorn.Server(config=config)
+
+        # Replaces the default server signal handler with a custom one that
+        # waits for a given amount time before we stop receiving incoming
+        # traffic.
+        self.incoming_traffic_grace_period = (
+            self.incoming_traffic_grace_period or DEFAULT_INCOMING_TRAFFIC_GRACE_PERIOD
+        )
+        if self.incoming_traffic_grace_period:
+            logger.info(
+                "Setting up signal handlers for graceful incoming traffic"
+                f" shutdown after {self.incoming_traffic_grace_period} seconds."
+            )
+            leopard_uvicorn_server.handle_exit = functools.partial(
+                self._handle_exit, leopard_uvicorn_server
+            )
+
+        self._print_launch_info(host, port, log_level)
+        leopard_uvicorn_server.run()
+
+    def _handle_exit(
+        self, uvicorn_server: uvicorn.Server, sig: int, frame: FrameType
+    ) -> None:
+        def sleep_and_handle_exit() -> None:
+            if sig == signal.SIGINT:
+                # SIGINT will always set should_exit to True immediately, and double
+                # SIGINT will force exit.
+                if uvicorn_server.should_exit:
+                    uvicorn_server.force_exit = True
+                else:
+                    uvicorn_server.should_exit = True
+            else:
+                # SIGTERM and others will trigger a slow shutdown
+                logger.info(
+                    "Gracefully stopping incoming traffic after "
+                    f"{self.incoming_traffic_grace_period} seconds."
+                )
+                time.sleep(self.incoming_traffic_grace_period)
+                logger.info("Setting should_exit to True.")
+                uvicorn_server.should_exit = True
+
+        # calls sleep_and_handle_exit in a separate thread to avoid
+        # blocking the main thread
+        th = threading.Thread(target=sleep_and_handle_exit, daemon=True)
+        th.start()
+
+    def _run_liveness_server(self):
+        def run_server():
+            app = FastAPI()
+
+            @app.get("/livez")
+            def livez():
+                return {"status": "ok"}
+
+            port = self.health_check_liveness_tcp_port
+            if port is None:
+                raise RuntimeError(
+                    "You made a programming error: _run_liveness_server has to be run"
+                    " after you checked that self.health_check_liveness_tcp_port is not"
+                    " None."
+                )
+            logger.info(f"Launching liveness server on port {port}")
+            uvicorn.run(app, host="0.0.0.0", port=port, log_level="error")
+
+        threading.Thread(target=run_server, daemon=True).start()
+
+    def launch(
+        self,
+        host: Optional[str] = "0.0.0.0",
+        port: Optional[int] = DEFAULT_PORT,
+        log_level: Optional[str] = "info",
+    ):
+        """
+        Launches the api service for the photon.
+        """
+        if (
+            self.health_check_liveness_tcp_port is not None
+            and self.health_check_liveness_tcp_port != port
+        ):
+            self._run_liveness_server()
+
+        self._call_init_once()
+        log_config = self._uvicorn_log_config()
+        self._uvicorn_run(
+            host=host, port=port, log_level=log_level, log_config=log_config
+        )
+
+    @staticmethod
+    def _collect_metrics(app):
+        latency_lowr_buckets = tuple(
+            # 0 ~ 1s: 10ms per bucket
+            [ms / 1000 for ms in range(10, 1000, 10)]
+            # 1 ~ 20s: 100ms per bucket
+            + [ms / 1000 for ms in range(1000, 20 * 1000, 100)]
+        )
+        instrumentator = Instrumentator().instrument(
+            app, latency_lowr_buckets=latency_lowr_buckets
+        )
+
+        @app.on_event("startup")
+        async def _startup():
+            instrumentator.expose(app, endpoint="/metrics", include_in_schema=False)
+
+    # helper function of _register_routes
+    def _mount_route(self, app, path, func, use_router_if_possible=True):
+        num_params = len(inspect.signature(func).parameters)
+        if num_params > 2:
+            raise ValueError(
+                "Mount function should only have zero or one (app) argument"
+            )
+        try:
+            if num_params == 2:
+                subapp = func.__get__(self, self.__class__)(app)
+            else:
+                subapp = func.__get__(self, self.__class__)()
+        except ImportError as e:
+            if "gradio" in str(e):
+                logger.warning(f"Skip mounting {path} as `gradio` is not installed")
+                return
+            if "flask" in str(e):
+                logger.warning(f"Skip mounting {path} as `flask` is not installed")
+                return
+            raise
+
+        try:
+            import gradio as gr  # type: ignore
+
+            has_gradio = True
+        except ImportError:
+            has_gradio = False
+
+        try:
+            from flask import Flask  # type: ignore
+
+            has_flask = True
+        except ImportError:
+            has_flask = False
+
+        if isinstance(subapp, FastAPI):
+            if use_router_if_possible:
+                app.include_router(subapp.router, prefix=f"/{path}")
+            else:
+                app.mount(f"/{path}", subapp)
+        elif isinstance(subapp, StaticFiles):
+            app.mount(f"/{path}", subapp)
+        elif isinstance(subapp, Photon):
+            subapp_real_app = subapp._create_app(load_mount=True)
+            if use_router_if_possible:
+                app.include_router(subapp_real_app.router, prefix=f"/{path}")
+            else:
+                app.mount(f"/{path}", subapp_real_app)
+        elif subapp.__module__ == "asgi_proxy" and subapp.__name__ == "asgi_proxy":
+            # asgi_proxy returns a lambda function (`<function
+            # asgi_proxy.asgi_proxy.<locals>.asgi_proxy(scope,
+            # receive, send)>`), it's not easy to type check it, so we
+            # just do name checking here
+            app.mount(f"/{path}", subapp)
+        elif not has_gradio and not has_flask:
+            logger.warning(
+                f"Skip mounting {path} as none of [`gradio`, `flask`] is"
+                " installed and it is not a FastAPI"
+            )
+        elif has_gradio and isinstance(subapp, gr.Blocks):  # type: ignore
+            gr.mount_gradio_app(app, subapp, f"/{path}")  # type: ignore
+        elif has_flask and isinstance(subapp, Flask):  # type: ignore
+            app.mount(f"/{path}", WSGIMiddleware(subapp))
+        else:
+            raise ValueError(
+                f"Cannot mount {subapp} to {path} as it is not a FastAPI,"
+                " gradio.Blocks or Flask"
+            )
+        return
+
+    def _create_typed_handler(
+        self, path: str, http_method: str, func: Callable, kwargs
+    ):
+        method = func.__get__(self, self.__class__)
+
+        request_model, response_model, response_class = create_model_for_func(
+            method,
+            func_name=self.__class__.__name__ + "_" + path,
+            use_raw_args=kwargs.get("use_raw_args"),
+            http_method=http_method,
+        )
+
+        if http_method.lower() == "post" and request_model is not None:
+            if "example" in kwargs:
+                request_model = Annotated[
+                    request_model, Body(example=kwargs["example"])
+                ]
+            if "examples" in kwargs:
+                request_model = Annotated[
+                    request_model, Body(examples=kwargs["examples"])
+                ]
+
+        if kwargs.get("max_batch_size") is not None:
+            method = batch(
+                kwargs["max_batch_size"],
+                kwargs["max_wait_time"],
+                self._handler_semaphore,
+                self.handler_timeout,
+            )(method)
+        else:
+            method = asyncfy_with_semaphore(
+                method, self._handler_semaphore, self.handler_timeout
+            )
+
+        async def handle_request(
+            request: Optional[Request],
+            cancel_on_connect_interval,
+            callback,
+            *args,
+            **kwargs,
+        ):
+            """
+            Common handler for processing requests.
+            """
+            try:
+                if cancel_on_connect_interval:
+                    assert request is not None
+                    res = await run_with_cancel_on_disconnect(
+                        request, cancel_on_connect_interval, callback, *args, **kwargs
+                    )
+                else:
+                    res = await callback(*args, **kwargs)
+            except Exception as e:
+                logger.info(f"Exception in handler:\n{traceback.format_exc()}")
+                if isinstance(e, TimeoutError):
+                    return JSONResponse(
+                        {
+                            "error": (
+                                f"handler timeout after {self.handler_timeout} seconds"
+                            )
+                        },
+                        status_code=504,
+                    )
+                elif isinstance(e, HTTPException):
+                    return JSONResponse({"error": e.detail}, status_code=e.status_code)
+                else:
+                    return JSONResponse({"error": str(e)}, status_code=500)
+            else:
+                if res is None:
+                    res = Response(status_code=204)
+                elif not isinstance(res, response_class):
+                    res = response_class(res)
+                return res
+
+        # for post handler, we change endpoint function's signature to make
+        # it taking json body as input, so do not copy the
+        # `__annotations__` attribute here
+        typed_handler_wrapper = functools.wraps(
+            method,
+            assigned=(
+                wa for wa in functools.WRAPPER_ASSIGNMENTS if wa != "__annotations__"
+            ),  # type: ignore
+        )
+
+        if http_method.lower() == "post":
+            # In the post mode, we do the following:
+            # - If the handler specifies "use_raw_args", then we don't wrap the args to a
+            # json body, but instead just pass the raw args up to fastapi.
+            # - Otherwise, we wrap the args to a json body, and use the request_model
+            # as the pydantic model to validate the json body.
+            # - If no args are specified, we don't wrap anything.
+            cancel_on_disconnect = kwargs.get("cancel_on_disconnect", False)
+            if cancel_on_disconnect and not isinstance(cancel_on_disconnect, float):
+                raise ValueError(
+                    "If you are specifying cancel_on_disconnect, you should specify it"
+                    " as a float number which is the interval in seconds to check if"
+                    " the client is still connected. Got"
+                    f" {cancel_on_disconnect} instead."
+                )
+
+            if kwargs.get("use_raw_args"):
+                if cancel_on_disconnect:
+                    raise ValueError(
+                        "Cancel_on_disconnect is currently not supported for the "
+                        "use_raw_args mode, as it involves hacking the FastAPI "
+                        "type annotations and is error prone. As a result, we do "
+                        "not recommend using cancel_on_disconnect in this mode."
+                    )
+
+                @typed_handler_wrapper
+                async def wrapped_method(*args, **kwargs):
+                    return await handle_request(None, False, method, *args, **kwargs)
+
+                typed_handler = FunctionType(
+                    wrapped_method.__code__,  # type: ignore
+                    globals(),
+                    "typed_handler",
+                    wrapped_method.__defaults__,  # type: ignore
+                    wrapped_method.__closure__,  # type: ignore
+                )
+                # Transfer the defaults and signature from the original method.
+                typed_handler.__annotations__ = method.__annotations__
+                typed_handler.__defaults__ = method.__defaults__  # type: ignore
+                typed_handler.__doc__ = method.__doc__
+                typed_handler.__kwdefaults__ = method.__kwdefaults__  # type: ignore
+                typed_handler.__signature__ = inspect.signature(method)  # type: ignore
+
+            elif request_model is not None:
+                vd = pydantic.decorator.validate_arguments(method).vd  # type: ignore
+
+                @typed_handler_wrapper
+                async def typed_handler(raw_request: Request, request: request_model):  # type: ignore
+                    return await handle_request(
+                        raw_request, cancel_on_disconnect, vd.execute, request
+                    )
+
+                delattr(typed_handler, "__wrapped__")
+            else:
+                # for post handler, we change endpoint function's signature to make
+                # it taking json body as input, so do not copy the
+                # `__annotations__` attribute here
+                @typed_handler_wrapper
+                async def typed_handler(raw_request: Request):  # type: ignore
+                    return await handle_request(
+                        raw_request, cancel_on_disconnect, method
+                    )
+
+                delattr(typed_handler, "__wrapped__")
+
+        elif http_method.lower() == "get":
+            if kwargs.get("use_raw_args"):
+                raise ValueError("use_raw_args is not supported for get handler")
+
+            @functools.wraps(method)
+            async def typed_handler(*args, **kwargs):
+                return await handle_request(None, False, method, *args, **kwargs)
+
+        else:
+            raise ValueError(f"Unsupported http method {http_method}")
+
+        typed_handler_kwargs = {
+            "response_model": response_model,
+            "response_class": response_class,
+        }
+
+        # Programming note: explicitly add other kwargs here if needed.
+        if "include_in_schema" in kwargs:
+            typed_handler_kwargs["include_in_schema"] = kwargs["include_in_schema"]
+
+        return typed_handler, typed_handler_kwargs
+
+    # helper function of _register_routes
+    def _add_route(
+        self, api_router: APIRouter, path: str, method: str, func: Callable, kwargs
+    ):
+        typed_handler, typed_handler_kwargs = self._create_typed_handler(
+            path, method, func, kwargs
+        )
+        api_router.add_api_route(
+            f"/{path}",
+            typed_handler,
+            name=path,
+            methods=[method],
+            **typed_handler_kwargs,
+        )
+
+    def _register_routes(self, app, load_mount):
+        api_router = APIRouter()
+        for path, routes in self._gather_routes().items():
+            for method, (func, kwargs) in routes.items():
+                if kwargs.get("mount"):
+                    if load_mount:
+                        self._mount_route(
+                            app,
+                            path,
+                            func,
+                            use_router_if_possible=kwargs.get(
+                                "use_router_if_possible", True
+                            ),
+                        )
+                else:
+                    self._add_route(api_router, path, method, func, kwargs)
+        app.include_router(api_router)
+
+    @staticmethod
+    def _santity_check_handler_kwargs(kwargs):
+        mbs, mwt = kwargs.get("max_batch_size"), kwargs.get("max_wait_time")
+        if (mbs is None) != (mwt is None):
+            raise ValueError(
+                "max_batch_size and max_wait_time should be both specified or not, got"
+                f" max_batch_size={mbs}, max_wait_time={mwt}"
+            )
+
+        if kwargs.get("mount") and (mbs is not None):
+            raise ValueError("mount and batching cannot be used together")
+        return
+
+    @staticmethod
+    def handler(path=None, method="POST", **kwargs):
+        Photon._santity_check_handler_kwargs(kwargs)
+
+        def decorator(func):
+            path_ = path if path is not None else func.__name__
+            path_ = path_.strip("/")
+
+            @functools.wraps(func)
+            def wrapped_func(self, *args, **kwargs):
+                self._call_init_once()
+                return func(self, *args, **kwargs)
+
+            setattr(
+                wrapped_func, PHOTON_HANDLER_PARAMS_KEY, (path_, method, func, kwargs)
+            )
+            return wrapped_func
+
+        if callable(path) and not kwargs:
+            # the decorator has been used without parenthesis, `path` is a
+            # function here
+            func_ = path
+            path = func_.__name__
+            return decorator(func_)
+        else:
+            return decorator
+
+    @classmethod
+    def _find_photon_subcls_names(cls, module):
+        # cyclic import
+        from .worker import Worker
+
+        valid_cls_names = []
+        for name, obj in inspect.getmembers(module):
+            if obj in (cls, Worker):
+                continue
+            if inspect.isclass(obj) and issubclass(obj, cls):
+                valid_cls_names.append(name)
+        return valid_cls_names
+
+    @classmethod
+    def create_from_model_str(cls, name, model_str):
+        schema, s = model_str.split(":", maxsplit=1)
+        if schema not in schemas:
+            raise ValueError(f"Schema should be one of ({schemas}): but got {schema}")
+
+        if ":" in s:
+            url_and_path, cls_name = s.rsplit(":", maxsplit=1)
+            if not cls_name.isidentifier():
+                url_and_path, cls_name = s, None
+        else:
+            url_and_path, cls_name = s, None
+
+        url_and_path_parts = url_and_path.rsplit(":", maxsplit=1)
+        if len(url_and_path_parts) > 1:
+            if len(url_and_path_parts) != 2:
+                raise ValueError(f"Doesn't meet 'url:path' format: {url_and_path}")
+            vcs_url, path = url_and_path_parts
+            cwd = fetch_code_from_vcs(vcs_url)
+        else:
+            vcs_url = None
+            path = url_and_path
+            cwd = os.getcwd()
+
+        with switch_cwd(cwd):
+            if os.path.exists(path):
+                path_parts = os.path.splitext(os.path.basename(path))
+                if len(path_parts) != 2 or path_parts[1] != ".py":
+                    raise ValueError(f"File path should be a Python file (.py): {path}")
+                module_name = path_parts[0]
+                spec = importlib.util.spec_from_file_location(module_name, path)
+                if spec is None:
+                    raise ValueError(
+                        f"Could not import Python module from path: {path}"
+                    )
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                if spec.loader is None:
+                    raise ValueError(
+                        f"Could not import Python module from path: {path}"
+                    )
+                spec.loader.exec_module(module)
+                if cls_name is None:
+                    valid_cls_names = cls._find_photon_subcls_names(module)
+                    if len(valid_cls_names) == 0:
+                        raise ValueError(
+                            f"Can not find any sub classes of {cls.__name__} in {path}"
+                        )
+                    elif len(valid_cls_names) > 1:
+                        raise ValueError(
+                            f"Found multiple sub classes of {cls.__name__} in {path}:"
+                            f" {valid_cls_names}"
+                        )
+                    else:
+                        cls_name = valid_cls_names[0]
+                        model_str = f"{model_str}:{cls_name}"
+            elif "." in path:
+                module_str, _, cls_name = path.rpartition(".")
+                try:
+                    module = importlib.import_module(module_str)
+                except ModuleNotFoundError:
+                    raise ValueError(
+                        f"'{path}' is neither an existing file nor an importable python"
+                        " variable"
+                    )
+            else:
+                raise ValueError(
+                    f"'{path}' is neither an existing file nor an importable python"
+                    " variable"
+                )
+
+            cloudpickle.register_pickle_by_value(module)
+            ph_cls = getattr(module, cls_name)
+            if not inspect.isclass(ph_cls) or not issubclass(ph_cls, cls):
+                raise ValueError(f"{cls_name} is not a sub class of {cls.__name__}")
+            ph = ph_cls(name=name, model=model_str)
+            if vcs_url is not None:
+                ph.vcs_url = vcs_url
+            return ph
+
+
+handler = Photon.handler
+
+
+schema_registry.register(schemas, Photon.create_from_model_str)
