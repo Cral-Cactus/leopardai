@@ -426,3 +426,590 @@ assistant:
                 )
             txt.submit(self.answer, [txt, state], [chatbot, state])
         return blocks
+
+
+class HuggingfaceText2TextGenerationPhoton(HuggingfacePhoton):
+    # essentially Text-generation task, but uses Encoder-Decoder architecture
+    hf_task: str = "text2text-generation"
+    requirement_dependency: Optional[List[str]] = ["protobuf==3.20.*"]
+
+    @Photon.handler(
+        "run",
+        example={
+            "inputs": "I enjoy walking with my cute dog",
+            "max_new_tokens": 50,
+            "do_sample": True,
+            "top_k": 50,
+            "top_p": 0.95,
+        },
+    )
+    def run(
+        self,
+        inputs: Union[str, List[str]],
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        temperature: Optional[float] = 1.0,
+        repetition_penalty: Optional[float] = None,
+        max_new_tokens: Optional[int] = None,
+        max_time: Optional[float] = None,
+        num_return_sequences: int = 1,
+        do_sample: bool = True,
+        **kwargs,
+    ) -> Union[str, List[str]]:
+        res = self._run_pipeline(
+            inputs,
+            top_k=top_k,
+            top_p=top_p,
+            temperature=temperature,
+            repetition_penalty=repetition_penalty,
+            max_new_tokens=max_new_tokens,
+            max_time=max_time,
+            num_return_sequences=num_return_sequences,
+            do_sample=do_sample,
+            **kwargs,
+        )
+        return _get_generated_text(res)
+
+    def answer(self, question, history):
+        history.append({"role": "user", "content": question})
+
+        # TODO: should limit the number of history messages to include into the
+        # prompt so that it doesn't exceed the max context length of the model
+        history_prompt = os.linesep.join(
+            [f"{h['role']}: {h['content']}" for h in history]
+        )
+        prompt = f"""\
+The following is a friendly conversation between a user and an assistant. The assistant is talkative and provides lots of specific details from its context. If the assistant does not know the answer to a question, it truthfully says it does not know.
+Current conversation:
+{history_prompt}
+
+assistant:
+"""
+        response = self._run_pipeline(prompt)[0]["generated_text"]
+        history.append({"role": "assistant", "content": response})
+        messages = [
+            (history[i]["content"], history[i + 1]["content"])
+            for i in range(0, len(history) - 1, 2)
+        ]
+        return messages, history
+
+    @Photon.handler(mount=True)
+    def ui(self):
+        import gradio as gr
+
+        blocks = gr.Blocks()
+        with blocks:
+            chatbot = gr.Chatbot(label=f"Chatbot ({self.hf_model})")
+            state = gr.State([])
+            with gr.Row():
+                txt = gr.Textbox(
+                    show_label=False, placeholder="Enter text and press enter"
+                )
+            txt.submit(self.answer, [txt, state], [chatbot, state])
+        return blocks
+
+
+class HuggingfaceASRPhoton(HuggingfacePhoton):
+    hf_task: str = "automatic-speech-recognition"
+
+    system_dependency = ["ffmpeg"]
+
+    @Photon.handler(
+        "run",
+        example={
+            "inputs": (
+                "https://huggingface.co/datasets/Narsil/asr_dummy/resolve/main/1.flac"
+            )
+        },
+    )
+    def run(self, inputs: Union[str, FileParam]) -> str:
+        if isinstance(inputs, FileParam):
+            file = tempfile.NamedTemporaryFile()
+            with open(file.name, "wb") as f:
+                f.write(inputs.file.read())
+                f.flush()
+            inputs = file.name
+
+        res = self._run_pipeline(inputs)
+        return res["text"]
+
+
+class HuggingfaceTextToImagePhoton(HuggingfacePhoton):
+    hf_task: str = "text-to-image"
+
+    def init(self):
+        super().init()
+
+        import torch
+
+        if torch.cuda.is_available():
+            self._device = "cuda"
+        else:
+            self._device = "cpu"
+
+    @Photon.handler(
+        "run",
+        example={
+            "prompt": "a photograph of an astronaut riding a horse",
+            "num_inference_steps": 25,
+            "seed": 42,
+        },
+    )
+    def run(
+        self,
+        prompt: Union[str, List[str]],
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 7.5,
+        negative_prompt: Optional[Union[str, List[str]]] = None,
+        seed: Optional[Union[int, List[int]]] = None,
+        **kwargs,
+    ) -> PNGResponse:
+        import torch
+
+        if seed is not None:
+            if not isinstance(seed, list):
+                seed = [seed]
+            generator = [
+                torch.Generator(device=self._device).manual_seed(s) for s in seed
+            ]
+        else:
+            generator = None
+
+        res = self._run_pipeline(
+            prompt,
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            negative_prompt=negative_prompt,
+            generator=generator,
+            **kwargs,
+        )
+        img_io = BytesIO()
+        res.images[0].save(img_io, format="PNG", quality="keep")
+        img_io.seek(0)
+        return PNGResponse(img_io)
+
+
+class HuggingfaceSummarizationPhoton(HuggingfacePhoton):
+    hf_task: str = "summarization"
+
+    @Photon.handler(
+        "run",
+        example={
+            "inputs": """The tower is 324 metres (1,063 ft) tall, about the same height as an 81-storey building, and the tallest structure in Paris. Its base is square, measuring 125 metres (410 ft) on each side. During its construction, the Eiffel Tower surpassed the Washington Monument to become the tallest man-made structure in the world, a title it held for 41 years until the Chrysler Building in New York City was finished in 1930. It was the first structure to reach a height of 300 metres. Due to the addition of a broadcasting aerial at the top of the tower in 1957, it is now taller than the Chrysler Building by 5.2 metres (17 ft). Excluding transmitters, the Eiffel Tower is the second tallest free-standing structure in France after the Millau Viaduct."""
+        },
+    )
+    def run(
+        self,
+        inputs: Union[str, List[str]],
+        **kwargs,
+    ) -> Union[str, List[str]]:
+        res = self._run_pipeline(
+            inputs,
+            **kwargs,
+        )
+        if isinstance(res, dict):
+            return res["summary_text"]
+        elif len(res) == 1:
+            return res[0]["summary_text"]
+        else:
+            return [r["summary_text"] for r in res]
+
+    def summarize(self, text: str) -> str:
+        return self.run_handler(text)
+
+    @Photon.handler(mount=True)
+    def ui(self):
+        import gradio as gr
+
+        blocks = gr.Blocks()
+        with blocks:
+            gr.Markdown("""
+            # Summarize
+            Start typing below to see the output.
+            """)
+            input_box = gr.Textbox(placeholder="text to summarize")
+            output_box = gr.Textbox()
+            btn = gr.Button("Summarize")
+            btn.click(fn=self.summarize, inputs=input_box, outputs=output_box)
+
+        return blocks
+
+
+class HuggingfaceSentenceSimilarityPhoton(HuggingfacePhoton):
+    hf_task: str = "sentence-similarity"
+
+    @Photon.handler(example={"inputs": "The cat sat on the mat"})
+    def embed(
+        self,
+        inputs: Union[str, List[str]],
+        **kwargs,
+    ) -> Union[List[float], List[List[float]]]:
+        res = self._run_pipeline(
+            inputs,
+            **kwargs,
+        )
+        if isinstance(res, list):
+            return [r.tolist() for r in res]
+        else:
+            return res.tolist()
+
+    @Photon.handler(
+        "run",
+        example={
+            "source_sentence": "That is a happy person",
+            "sentences": [
+                "That is a happy dog",
+                "That is a very happy person",
+                "Today is a sunny day",
+            ],
+        },
+    )
+    def run(
+        self,
+        source_sentence: str,
+        sentences: Union[str, List[str]],
+        **kwargs,
+    ) -> Union[float, List[float]]:
+        from sentence_transformers import util
+
+        sentences_embs = self._run_pipeline(sentences, **kwargs)
+        source_sentence_emb = self._run_pipeline(source_sentence, **kwargs)
+        res = util.cos_sim(source_sentence_emb, sentences_embs)
+
+        if res.dim() != 2 or res.size(0) != 1:
+            logger.error(f"Unexpected result shape: {res.shape}")
+        return res[0].tolist()
+
+
+class HuggingfaceSentimentAnalysisPhoton(HuggingfacePhoton):
+    hf_task: str = "sentiment-analysis"
+
+    @Photon.handler(example={"inputs": ["I love you", "I hate you"]})
+    def run(
+        self,
+        inputs: Union[str, List[str]],
+        **kwargs,
+    ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+        res = self._run_pipeline(
+            inputs,
+            **kwargs,
+        )
+        return res
+
+
+# text-classification is an alias of sentiment-analysis
+class HuggingfaceTextClassificationPhoton(HuggingfaceSentimentAnalysisPhoton):
+    hf_task: str = "text-classification"
+
+
+class HuggingfaceTokenClassificationPhoton(HuggingfacePhoton):
+    hf_task: str = "token-classification"
+
+    @Photon.handler(example={"inputs": "Hugging Face is a French company."})
+    def run(
+        self,
+        inputs: Union[str, List[str]],
+        **kwargs,
+    ) -> Union[List[Dict[str, Any]], List[List[Dict[str, Any]]]]:
+        res = self._run_pipeline(
+            inputs,
+            **kwargs,
+        )
+        # Workaround for some implementation that returns np.float32 instead of
+        # float: we look into the returned dictionary, and if we find np.float32,
+        # we convert it to float.
+        import numpy as np
+
+        for r in [res] if isinstance(res[0], dict) else res:
+            for d in r:
+                for k, v in d.items():
+                    if type(v) == np.float32:
+                        d[k] = float(v)
+        return res
+
+
+class HuggingfaceAudioClassificationPhoton(HuggingfacePhoton):
+    hf_task: str = "audio-classification"
+
+    system_dependency = ["ffmpeg"]
+
+    @Photon.handler(
+        "run",
+        example={
+            "inputs": (
+                "https://huggingface.co/datasets/Narsil/asr_dummy/resolve/main/1.flac"
+            )
+        },
+    )
+    def run(
+        self,
+        inputs: Union[Union[str, FileParam], List[Union[str, FileParam]]],
+        **kwargs,
+    ) -> Union[
+        List[Dict[str, Union[float, str]]], List[List[Dict[str, Union[float, str]]]]
+    ]:
+        inputs_is_list = isinstance(inputs, list)
+        if not inputs_is_list:
+            inputs = [inputs]
+        inputs_ = []
+        # keep references to NamedTemporaryFile objects so they don't get deleted
+        temp_files = []
+        for inp in inputs:
+            if isinstance(inp, FileParam):
+                file = tempfile.NamedTemporaryFile()
+                with open(file.name, "wb") as f:
+                    f.write(inp.file.read())
+                    f.flush()
+                temp_files.append(file)
+                inputs_.append(file.name)
+            else:
+                inputs_.append(inp)
+        res = self._run_pipeline(
+            inputs_,
+            **kwargs,
+        )
+        if not inputs_is_list:
+            res = res[0]
+        return res
+
+
+class HuggingfaceDepthEstimationPhoton(HuggingfacePhoton):
+    hf_task: str = "depth-estimation"
+
+    @Photon.handler(
+        "run",
+        example={
+            "images": [
+                "http://images.cocodataset.org/val2017/000000039769.jpg",
+                "https://images.unsplash.com/photo-1536396123481-991b5b636cbb?ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D&auto=format&fit=crop&w=2896&q=80",
+            ]
+        },
+    )
+    def run(
+        self,
+        images: Union[Union[str, FileParam], List[Union[str, FileParam]]],
+        **kwargs,
+    ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+        inputs_is_list = isinstance(images, list)
+
+        if not inputs_is_list:
+            images = [images]
+        images = [img_param_to_img(img) for img in images]
+
+        res = self._run_pipeline(
+            images,
+            **kwargs,
+        )
+
+        if not isinstance(res, list):
+            res = [res]
+        for i, r in enumerate(res):
+            # TODO: Should we drop "predicted_depth" in the response?
+            # Convert "predicted_depth" (torch.Tensor) to list(s) of floats
+            predicted_depth = r["predicted_depth"].tolist()
+
+            # Convert "depth" PIL.Image to base64-encoded JPEG
+            depth_io = BytesIO()
+            r["depth"].save(depth_io, format="JPEG")
+            depth = base64.b64encode(depth_io.getvalue()).decode("ascii")
+
+            res[i] = {
+                "predicted_depth": predicted_depth,
+                "depth": depth,
+            }
+
+        if not inputs_is_list:
+            res = res[0]
+        return res
+
+    @Photon.handler(mount=True)
+    def ui(self):
+        import gradio as gr
+
+        blocks = gr.Blocks()
+        with blocks:
+            with gr.Row():
+                input_image = gr.Image(type="filepath")
+                output_image = gr.Image(type="pil")
+            with gr.Row():
+                btn = gr.Button("Depth Estimate", variant="primary")
+                btn.click(
+                    fn=lambda img: self._run_pipeline(img)["depth"],
+                    inputs=input_image,
+                    outputs=output_image,
+                )
+        return blocks
+
+
+class HuggingfaceImageToTextPhoton(HuggingfacePhoton):
+    hf_task: str = "image-to-text"
+
+    @Photon.handler(
+        "run",
+        example={"images": "http://images.cocodataset.org/val2017/000000039769.jpg"},
+    )
+    def run(
+        self,
+        images: Union[Union[str, FileParam], List[Union[str, FileParam]]],
+        **kwargs,
+    ) -> Union[str, List[str]]:
+        images_is_list = isinstance(images, list)
+        if not images_is_list:
+            images = [images]
+        images_ = []
+        # keep references to NamedTemporaryFile objects so they don't get deleted
+        temp_files = []
+        for img in images:
+            if isinstance(img, FileParam):
+                file = tempfile.NamedTemporaryFile()
+                with open(file.name, "wb") as f:
+                    f.write(img.file.read())
+                    f.flush()
+                temp_files.append(file)
+                images_.append(file.name)
+            else:
+                images_.append(img)
+        res = self._run_pipeline(
+            images_,
+            **kwargs,
+        )
+        return _get_generated_text(res)
+
+
+class HuggingfaceImageToImagePhoton(HuggingfacePhoton):
+    hf_task: str = "image-to-image"
+
+    def init(self):
+        super().init()
+
+        import torch
+
+        if torch.cuda.is_available():
+            self._device = "cuda"
+        else:
+            self._device = "cpu"
+
+    @Photon.handler(
+        example={
+            "image": "http://images.cocodataset.org/val2017/000000039769.jpg",
+            "prompt": "Two dogs sleeping on a couch",
+            "num_inference_steps": 25,
+            "guidance_scale": 7.5,
+            "negative_prompt": None,
+            "seed": 42,
+        },
+    )
+    async def run(
+        self,
+        image: Union[Union[str, FileParam], List[Union[str, FileParam]]],
+        prompt: Optional[Union[str, List[str]]] = None,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 7.5,
+        negative_prompt: Optional[Union[str, List[str]]] = None,
+        seed: Optional[Union[int, List[int]]] = None,
+        strength: float = 0.8,
+        **kwargs,
+    ) -> PNGResponse:
+        import torch
+
+        if seed is not None:
+            if not isinstance(seed, list):
+                seed = [seed]
+            generator = [
+                torch.Generator(device=self._device).manual_seed(s) for s in seed
+            ]
+        else:
+            generator = None
+
+        if not isinstance(image, list):
+            image = [image]
+        try:
+            image_ = [img_param_to_img(img) for img in image]
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not load image {image}: {e}",
+            )
+
+        res = self._run_pipeline(
+            prompt,
+            image=image_,
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            negative_prompt=negative_prompt,
+            generator=generator,
+            strength=strength,
+            **kwargs,
+        )
+        img_io = BytesIO()
+        res.images[0].save(img_io, format="PNG", quality="keep")
+        img_io.seek(0)
+        return PNGResponse(img_io)
+
+
+class HuggingfaceImageClassificationPhoton(HuggingfacePhoton):
+    hf_task: str = "image-classification"
+
+    @Photon.handler(
+        "run",
+        example={"images": "http://images.cocodataset.org/val2017/000000039769.jpg"},
+    )
+    def run(
+        self,
+        images: Union[Union[str, FileParam], List[Union[str, FileParam]]],
+        **kwargs,
+    ) -> Union[List[Dict], List[List[Dict]]]:
+        images_is_list = isinstance(images, list)
+        if not images_is_list:
+            images = [images]
+        # keep references to NamedTemporaryFile objects so they don't get deleted
+        images_ = []
+        temp_files = []
+        for img in images:
+            if isinstance(img, FileParam):
+                file = tempfile.NamedTemporaryFile()
+                with open(file.name, "wb") as f:
+                    f.write(img.file.read())
+                    f.flush()
+                temp_files.append(file)
+                images_.append(file.name)
+            else:
+                images_.append(img)
+        res = self._run_pipeline(
+            images_,
+            **kwargs,
+        )
+        return res if images_is_list else res[0]
+
+
+class HuggingfaceFeatureExtractionPhoton(HuggingfacePhoton):
+    hf_task: str = "feature-extraction"
+
+    @Photon.handler(example={"inputs": "The cat sat on the mat"})
+    def run(
+        self,
+        inputs: Union[str, List[str]],
+        **kwargs,
+    ) -> Union[List[List[List[float]]], List[List[List[List[float]]]]]:
+        # output shape:
+        #     [1, sequence_lenth, hidden_dimension] or
+        #     [batch_size, 1, sequence_lenth, hidden_dimension]
+        res = self._run_pipeline(
+            inputs,
+            **kwargs,
+        )
+        return res
+
+
+def register_hf_photon():
+    schema_registry.register(
+        HUGGING_FACE_SCHEMAS, HuggingfacePhoton.create_from_model_str
+    )
