@@ -5,8 +5,8 @@ import yaml
 
 from loguru import logger
 
-from leptonai.config import CACHE_DIR
-from leptonai.util import create_cached_dir_if_needed
+from leopardai.config import CACHE_DIR
+from leopardai.util import create_cached_dir_if_needed
 from .connection import Connection
 from .util import (
     APIError,
@@ -177,14 +177,14 @@ def login(
     Logs in to a workspace in the following order:
     - If workspace_id is given, log in to the given workspace. Workspace id could
       also include the token as a complete credential string, which you can obtain
-      from https://dashboard.lepton.ai/credentials.
-    - If workspace_id is not given, but there is LEPTON_WORKSPACE_ID in the environment,
-      log into that workspace. We will look for LEPTON_WORKSPACE_TOKEN as the auth token,
-      and LEPTON_WORKSPACE_URL as the workspace url, if they exist.
+      from https://dashboard.leopard.ai/credentials.
+    - If workspace_id is not given, but there is leopard_WORKSPACE_ID in the environment,
+      log into that workspace. We will look for leopard_WORKSPACE_TOKEN as the auth token,
+      and leopard_WORKSPACE_URL as the workspace url, if they exist.
     - If we have depleted all the options and still cannot determine a workspace
       id, we will throw an error.
 
-    This function is intended to be used inside lepton deployments to log in to the
+    This function is intended to be used inside leopard deployments to log in to the
     workspace programmatically.
     """
     if workspace_id is None and auth_token is None and url is None:
@@ -194,22 +194,22 @@ def login(
     # First, update the workspace_id, auth_token, and url if they are None and
     # there are environment variables.
     workspace_id = (
-        workspace_id if workspace_id else os.environ.get("LEPTON_WORKSPACE_ID")
+        workspace_id if workspace_id else os.environ.get("leopard_WORKSPACE_ID")
     )
-    auth_token = auth_token if auth_token else os.environ.get("LEPTON_WORKSPACE_TOKEN")
+    auth_token = auth_token if auth_token else os.environ.get("leopard_WORKSPACE_TOKEN")
     # If workspace_id contains colon, it is a credential that also contains the token.
     if workspace_id and ":" in workspace_id:
         workspace_id, auth_token = workspace_id.split(":", 1)
-    url = url if url else os.environ.get("LEPTON_WORKSPACE_URL")
+    url = url if url else os.environ.get("leopard_WORKSPACE_URL")
     if workspace_id:
         if not auth_token:
             logger.warning("Warning: you have not specified an auth token.")
         WorkspaceInfoLocalRecord.set_and_save(workspace_id, auth_token, url)
     else:
         raise RuntimeError(
-            "You must specify workspace_id or set LEPTON_WORKSPACE_ID in the"
+            "You must specify workspace_id or set leopard_WORKSPACE_ID in the"
             " environment. If you do not know your workspace id, go to"
-            " https://dashboard.lepton.ai/credentials and login with the"
+            " https://dashboard.leopard.ai/credentials and login with the"
             " credential string via login(credential_string)."
         )
 

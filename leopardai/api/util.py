@@ -1,12 +1,12 @@
 """
-Utility functions for the Lepton AI API.
+Utility functions for the leopard AI API.
 """
 
 import json
 import requests
 from typing import Dict, List, Optional, Union
 
-from leptonai.config import WORKSPACE_URL_RESOLVER_API, WORKSPACE_API_PATH
+from leopardai.config import WORKSPACE_URL_RESOLVER_API, WORKSPACE_API_PATH
 
 
 class APIError(object):
@@ -41,7 +41,7 @@ def json_or_error(
         except json.JSONDecodeError:
             # This should not happen: apis that use json_or_error should make sure
             # that the response is json. If this happens, it is either a programming
-            # error, or the api has changed, or the lepton ai cloud side has a bug.
+            # error, or the api has changed, or the leopard ai cloud side has a bug.
             return APIError(
                 response,
                 message=(
@@ -78,12 +78,12 @@ class WorkspaceNotCreatedYet(RuntimeError):
 
 def _get_full_workspace_url(workspace_id) -> str:
     """
-    Gets the workspace url from the given workspace_id. This calls Lepton's backend server
+    Gets the workspace url from the given workspace_id. This calls leopard's backend server
     to get the workspace url.
 
     The workspace url is different from the workspace api url: the workspace url is the url
     that the client uses to call deployments, while the workspace api url is used to call
-    the Lepton API.
+    the leopard API.
 
     :param str workspace_id: the workspace_id of the workspace
     :return: the workspace url, or None if the workspace does not exist
@@ -94,7 +94,7 @@ def _get_full_workspace_url(workspace_id) -> str:
     res = requests.get(WORKSPACE_URL_RESOLVER_API, json=request_body)
     if not res.ok:
         raise RuntimeError(
-            f"Lepton server returned an error: {res.status_code} {res.content}."
+            f"leopard server returned an error: {res.status_code} {res.content}."
         )
     elif res.content == b"":
         raise RuntimeError(f"Cannot find the workspace with id {workspace_id}.")
@@ -118,14 +118,14 @@ def _print_workspace_not_created_yet_message(workspace_id: str):
     """
     print(
         f"Workspace {workspace_id} is registerd, but not set up yet. To set it up,"
-        f" Please visit\n  https://dashboard.lepton.ai/workspace/{workspace_id}/setup\n"
+        f" Please visit\n  https://dashboard.leopard.ai/workspace/{workspace_id}/setup\n"
         " After that, you can log in here and use the workspace via CLI or API."
     )
 
 
 def _get_workspace_display_name(workspace_id) -> Optional[str]:
     """
-    Gets the workspace display name from the given workspace_id. This calls Lepton's backend server
+    Gets the workspace display name from the given workspace_id. This calls leopard's backend server
     to get the workspace display name.
 
     :param str workspace_id: the workspace_id of the workspace
@@ -137,7 +137,7 @@ def _get_workspace_display_name(workspace_id) -> Optional[str]:
     res = requests.get(WORKSPACE_URL_RESOLVER_API, json=request_body)
     if not res.ok:
         raise RuntimeError(
-            f"Lepton server returned an error: {res.status_code} {res.content}."
+            f"leopard server returned an error: {res.status_code} {res.content}."
         )
     elif res.content == b"":
         raise RuntimeError(f"Cannot find the workspace with id {workspace_id}.")

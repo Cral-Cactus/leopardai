@@ -31,13 +31,13 @@ class APIResourse(object):
     the DeploymentAPI class is used which is a subclass of APIResource.
 
     Implementation note: if you are implementing a new set of API, you should subclass
-    APIResource and implement the required methods. And then, in leptonai/api/v1/workspace.py,
+    APIResource and implement the required methods. And then, in leopardai/api/v1/workspace.py,
     you should add a new line in the __init__ function to register the new APIResource.
     For example, if you are implementing a new API for "Magic", you should define a
     class MagicAPI(APIResource) and then in the __init__ function of Workspace, you should
     add the following line:
         self.magic = MagicAPI(self)
-    See for example leptonai/api/v1/deployment.py for an example.
+    See for example leopardai/api/v1/deployment.py for an example.
     """
 
     _client: "APIClient"
